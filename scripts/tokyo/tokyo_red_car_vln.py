@@ -34,7 +34,7 @@ MAX_STEPS = int(os.getenv('VLN_MAX_STEPS', '40'))
 FORWARD_SAFE_DISTANCE = float(os.getenv('VLN_FORWARD_SAFE_DISTANCE', '14'))
 ROAD_TURN_ANGLE = float(os.getenv('VLN_ROAD_TURN_ANGLE', '24'))
 MAX_CONSECUTIVE_HOVER = int(os.getenv('VLN_MAX_CONSECUTIVE_HOVER', '3'))
-ENABLE_DEPTH_AVOIDANCE = os.getenv('VLN_ENABLE_DEPTH_AVOIDANCE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
+ENABLE_DEPTH_AVOIDANCE = os.getenv('VLN_ENABLE_DEPTH_AVOIDANCE', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 def _clamp(value: float, min_value: float, max_value: float) -> float:
@@ -53,6 +53,7 @@ def _check_forward_clearance(ctrl: AirSimController, safe_distance: float):
     if not ENABLE_DEPTH_AVOIDANCE:
         return True, None
     return ctrl.is_forward_path_clear(safe_distance_m=safe_distance)
+
 
 
 def run_tokyo_red_car_vln(instruction: str = DEFAULT_INSTRUCTION):
@@ -251,6 +252,17 @@ def run_tokyo_red_car_vln(instruction: str = DEFAULT_INSTRUCTION):
                         last_action = 'move_up'
                         time.sleep(0.35)
                         continue
+
+            # 红车可见但未居中时，强制平移对准，不允许前进
+            if target_visible and not centered and action == 'move_forward':
+                if target_offset in {'left', 'upper_left', 'lower_left'}:
+                    logger.info('红车可见但偏左，强制改为 move_left')
+                    action = 'move_left'
+                    params = {'distance': 6.0}
+                elif target_offset in {'right', 'upper_right', 'lower_right'}:
+                    logger.info('红车可见但偏右，强制改为 move_right')
+                    action = 'move_right'
+                    params = {'distance': 6.0}
 
             if action == 'move_forward':
                 safe_distance = FORWARD_SAFE_DISTANCE

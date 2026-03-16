@@ -406,7 +406,7 @@ def run_task_sequence(steps: List[Dict[str, Any]]):
 if __name__ == '__main__':
     # 示例：沿道路飞行 → 第一个十字路口左转 → 搜索红色车辆
     task = [
-        {"type": "follow_road",           "max_steps": 20},
+        {"type": "follow_road",           "max_steps": 35},
         {"type": "turn_at_intersection",  "direction": "left"},
         {"type": "find_target",           "target": "红色车辆", "max_steps": 40},
     ]

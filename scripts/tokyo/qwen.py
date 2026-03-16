@@ -10,7 +10,7 @@ import numpy as np
 import cv2
 
 class QwenVisionAgent:
-    def __init__(self, api_key: str, model: str = "qwen3-vl-flash", output_dir: str = None):
+    def __init__(self, api_key: str, model: str = "qwen-vl-plus-2025-05-07", output_dir: str = None):
         """
         初始化 Qwen 视觉智能体
         """
@@ -222,9 +222,19 @@ class QwenVisionAgent:
   - 道路在画面中心区域明显变宽，出现斑马线、停车线或路口标记
   - 当前道路前方出现垂直方向的横向道路
   - 画面中可见多个方向的道路延伸出去
+  - 从高空俯视时，路口表现为道路交叉形成的"+"或"T"形浅色区域，周围有建筑物围绕
+  - 画面中央或前方出现比正常道路更宽的开阔区域，两侧有建筑物
+  - 能看到与当前飞行方向垂直的横向道路，哪怕只有一侧可见
 - 禁止把十字路口报告为 "forward"，这会导致无人机错过转弯点
 - 在十字路口时 action 输出 "move_forward" 并将 road_direction 设为 "intersection"，让上层逻辑决定转弯方向
 - 宁可多报十字路口也不要漏报
+- 特别注意：画面中出现横向道路、路口标线、斑马线时，即使主路仍然笔直，也必须报告 intersection
+
+【任务意图优先规则（必须严格执行）】
+- 若“任务指令”文本中包含“左转”“向左转”“第一个路口左转”等语义：
+    - 一旦检测到 intersection，优先输出 action="rotate_left"，parameters.angle 建议 20 到 35 度
+    - 若画面信息不足以立即转动，至少必须输出 road_direction="intersection"，禁止输出 "forward"
+- 若“任务指令”文本中包含“右转”语义，按对称规则处理 rotate_right
 
 【红车搜索与锁定】
 - 从高空俯视时，红车呈较小的鲜红色矩形，通常出现在道路或停车场上
@@ -250,9 +260,12 @@ class QwenVisionAgent:
 - 若 road_visible=true 且 target_visible=false，优先输出 move_forward（建议 12 到 24 米），不要输出 hover
 - 若 road_visible=false 且 target_visible=false，优先输出 rotate_left 或 rotate_right（10 到 25 度），不要输出 hover
 
-到达标准：
-- 红车在画面中心附近清晰可见，distance_bucket 为 near 或 mid，返回 arrived
+到达标准（必须严格执行）：
+- 只要满足以下任意一条，必须立即返回 arrived，禁止继续前进：
+  1) target_visible=true 且 centered=true（红车在画面中心区域）
+  2) target_visible=true 且 distance_bucket 为 near 或 mid 且 centered=true
 - arrived 表示已到达车辆正上方附近，不需要贴地降落
+- 禁止在看到红车且居中时仍返回 move_forward，这是严重错误
 
 输出要求：
 - 只返回一个 JSON 对象，不要附加解释
@@ -269,8 +282,8 @@ class QwenVisionAgent:
 - should_descend: true/false
 
 distance_bucket 从高空俯视判定：
-- near: 车体在画面中占比可辨识、清晰，当前高度已较低（约 30 到 60 米）
-- mid: 能看到红色矩形但体积仍小，还需接近
+- near: 红车在画面中清晰可见，占比明显，位置居中或接近居中
+- mid: 能看到红色矩形但体积仍小，还需接近或平移对准
 - far: 红色矩形很小或需要仔细辨认，明显还远
 - unknown: 看不到或无法判断
 
