@@ -35,11 +35,11 @@
   .info-col { width: 280px; min-width: 200px; max-width: 420px; display: flex; flex-direction: column; gap: 8px; padding: 0 10px 12px 10px; overflow-y: auto; flex-shrink: 0; background: #f8f9fa; }
   .info-col-header { height: 36px; display: flex; align-items: center; font-size: 13px; font-weight: bold; color: #2c3e50; background: #f8f9fa; margin: 0 -10px; padding: 0 14px; flex-shrink: 0; border-bottom: 1px solid #e0e0e0; }
   .card { background: white; border-radius: 8px; padding: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
-  .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #999; font-weight: bold; margin-bottom: 10px; }
+  .card-label { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #555; font-weight: bold; margin-bottom: 10px; }
   .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .stat { background: #f8f9fa; border-radius: 6px; padding: 8px 10px; }
-  .stat .lbl { font-size: 11px; color: #999; margin-bottom: 3px; }
-  .stat .val { font-size: 14px; font-weight: bold; color: #1976d2; }
+  .stat .lbl { font-size: 12px; color: #555; margin-bottom: 3px; }
+  .stat .val { font-size: 15px; font-weight: bold; color: #1976d2; }
   #action-val { font-size: 20px; font-weight: bold; color: #e67e22; text-align: center; padding: 8px; }
   .tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; }
   .tag.yes { background: #e8f5e9; color: #388e3c; }
@@ -84,6 +84,14 @@
 
   <div class="info-col" id="info-col">
     <div class="info-col-header">导航状态</div>
+    <div class="card">
+      <div class="card-label">任务指令</div>
+      <div id="instruction-val" style="font-size:13px;color:#2c3e50;word-break:break-all;">-</div>
+    </div>
+    <div class="card">
+      <div class="card-label">任务序列</div>
+      <div id="task-steps-val" style="font-size:12px;color:#34495e;line-height:1.8;">-</div>
+    </div>
     <div class="card">
       <div class="card-label">任务状态</div>
       <div class="stat-grid">
@@ -249,6 +257,14 @@ async function fetchData() {
       else document.getElementById('frame-cnt').textContent = `${currentIdx+1}/${history.length}`;
       if (history.length === 1) goLive();
     }
+  } catch(e) {}
+  try {
+    const ti = await fetch('/api/task_info').then(r => r.json());
+    document.getElementById('instruction-val').textContent = ti.instruction || '-';
+    const steps = ti.steps || [];
+    document.getElementById('task-steps-val').innerHTML = steps.length
+      ? steps.map((s, i) => `<span style="color:#7ec8e3">${i+1}.</span> ${s}`).join('<br>')
+      : '-';
   } catch(e) {}
 }
 updateUI();

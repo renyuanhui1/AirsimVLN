@@ -10,7 +10,7 @@ import numpy as np
 import cv2
 
 class QwenVisionAgent:
-    def __init__(self, api_key: str, model: str = "qwen-vl-plus-2025-05-07", output_dir: str = None):
+    def __init__(self, api_key: str, model: str = "qwen2.5-vl-72b-instruct", output_dir: str = None):
         """
         初始化 Qwen 视觉智能体
         """
@@ -201,71 +201,56 @@ class QwenVisionAgent:
 【道路跟随】
 - 优先在道路上方飞行，不要穿越建筑楼顶（楼顶通常表现为大块灰色/棕色矩形区域）
 - 未见红车时，沿道路方向前进，单步建议 14 到 28 米
-- 道路在画面中明显朝某方向弯折时（left_curve/right_curve），先旋转对齐道路，角度建议 15 到 40 度
-- 到达十字路口时，可略微旋转（10 到 20 度）选择主干道方向继续前进
-- 转向后下一步优先 move_forward 10 到 18 米，贴着道路推进
+- 无论道路是否弯折，始终输出 move_forward，不要输出 rotate_left 或 rotate_right
+- 转向由上层逻辑控制，你只需判断道路和目标状态
 
 【road_direction 判定规则（必须严格执行）】
 - 观察画面中道路的延伸方向，以画面中心为基准：
-  - 道路在画面下半部分向左偏转超过 15 度 → road_direction = "left_curve"，action 必须为 rotate_left
-  - 道路在画面下半部分向右偏转超过 15 度 → road_direction = "right_curve"，action 必须为 rotate_right
+  - 道路在画面下半部分向左偏转超过 15 度 → road_direction = "left_curve"
+  - 道路在画面下半部分向右偏转超过 15 度 → road_direction = "right_curve"
   - 道路基本笔直延伸到画面上方 → road_direction = "forward"
   - 出现明显十字路口或多叉路 → road_direction = "intersection"
   - 看不到道路 → road_direction = "lost"
-- 禁止在道路明显弯折时仍报告 "forward"，这是最常见的错误，必须避免
-- 判断弯折时不要只看画面中心，要看道路整体走势，尤其是画面边缘道路消失的方向
-- 宁可多报弯道也不要漏报，漏报会导致无人机冲出道路
+- road_direction 只用于上报道路状态，不影响 action 输出
 
 【十字路口识别规则（必须严格执行）】
-- 十字路口的典型特征（满足任意一条即可判定为 intersection）：
-  - 画面中出现两条或以上道路交叉，形成十字、T字、Y字形
-  - 道路在画面中心区域明显变宽，出现斑马线、停车线或路口标记
-  - 当前道路前方出现垂直方向的横向道路
-  - 画面中可见多个方向的道路延伸出去
-  - 从高空俯视时，路口表现为道路交叉形成的"+"或"T"形浅色区域，周围有建筑物围绕
-  - 画面中央或前方出现比正常道路更宽的开阔区域，两侧有建筑物
-  - 能看到与当前飞行方向垂直的横向道路，哪怕只有一侧可见
-- 禁止把十字路口报告为 "forward"，这会导致无人机错过转弯点
-- 在十字路口时 action 输出 "move_forward" 并将 road_direction 设为 "intersection"，让上层逻辑决定转弯方向
-- 宁可多报十字路口也不要漏报
-- 特别注意：画面中出现横向道路、路口标线、斑马线时，即使主路仍然笔直，也必须报告 intersection
-
-【任务意图优先规则（必须严格执行）】
-- 若“任务指令”文本中包含“左转”“向左转”“第一个路口左转”等语义：
-    - 一旦检测到 intersection，优先输出 action="rotate_left"，parameters.angle 建议 20 到 35 度
-    - 若画面信息不足以立即转动，至少必须输出 road_direction="intersection"，禁止输出 "forward"
-- 若“任务指令”文本中包含“右转”语义，按对称规则处理 rotate_right
+- 只有当无人机已经飞到路口正上方或路口中心区域时，才报告 intersection：
+  - 路口交叉区域占据画面中央大部分，能清晰看到多个方向道路从画面中心向四周延伸
+  - 画面中心是开阔的路口地面，而不是某条单一道路
+  - 路口斑马线、停止线或路口地面必须出现在画面正中央
+- 路口还在画面前方远处（路口在画面上半部分或边缘）→ 继续报 forward，前进接近
+- 路口刚出现在画面中但还未到中心 → 继续报 forward，继续前进直到路口占据画面中央
+- 禁止在路口还未到达时就报告 intersection，这会导致无人机在路口前方就开始转弯
+- 在十字路口时 action 输出 “move_forward” 并将 road_direction 设为 “intersection”，让上层逻辑决定转弯方向
 
 【红车搜索与锁定】
 - 从高空俯视时，红车呈较小的鲜红色矩形，通常出现在道路或停车场上
-- 发现红车后，如未居中，优先用 move_left/move_right 平移对准，建议 4 到 12 米
-- 红车可见且仍较远时，前进 8 到 16 米接近
-- 红车可见且 distance_bucket 为 mid 时，降低高度以便更好锁定，建议 move_down 5 到 12 米
-- 连续看见红车（target_lock_frames ≥ 2）后，可以加速下降接近
+- 发现红车后，只需前进接近，禁止使用 move_left 或 move_right 平移对准
+- distance_bucket 为 far 时，前进 12 到 20 米
+- distance_bucket 为 mid 时，前进 6 到 12 米
+- distance_bucket 为 near 且 centered=true 时，输出 arrived
 
 【高度管理】
 - 搜索阶段保持 90 到 110 米高度，视野广，便于找到红车
-- 锁定红车后，逐步下降到 30 到 60 米，使车辆在画面中更清晰
-- 不要在搜索阶段就降低高度，会缩小视野
 
-【道路丢失处理】
-- 若道路与红车均不可见（楼顶或空地），先小角度旋转（10 到 20 度）尝试重新对准道路，不要大步前冲
-- 若连续多步丢失道路，可略微上升 5 到 10 米扩大视野
 
 【动作输出强约束（必须遵守）】
-- 禁止连续输出 hover；默认应输出 move_forward / rotate_left / rotate_right / move_left / move_right 之一
+- 禁止输出 rotate_left 或 rotate_right，转向由上层逻辑控制
+- 禁止连续输出 hover；默认应输出 move_forward / move_left / move_right 之一
 - 只有在以下情况才允许输出 hover：
     1) target_visible=true 且 centered=true，正在等待到达判定
     2) 当前帧严重模糊、无法判断道路和目标（road_visible=false 且 road_follow_confidence=low）
 - 若 road_visible=true 且 target_visible=false，优先输出 move_forward（建议 12 到 24 米），不要输出 hover
-- 若 road_visible=false 且 target_visible=false，优先输出 rotate_left 或 rotate_right（10 到 25 度），不要输出 hover
+- 若 road_visible=false 且 target_visible=false，优先输出 move_forward（建议 12 到 20 米），不要输出 hover 或 rotate
 
 到达标准（必须严格执行）：
-- 只要满足以下任意一条，必须立即返回 arrived，禁止继续前进：
-  1) target_visible=true 且 centered=true（红车在画面中心区域）
-  2) target_visible=true 且 distance_bucket 为 near 或 mid 且 centered=true
+- 只有同时满足以下所有条件，才能返回 arrived：
+  1) target_visible=true
+  2) centered=true（红车在画面正中央，偏移不超过画面宽度的 15%）
+  3) distance_bucket 为 near 或 mid
+- 未同时满足以上三条，禁止输出 arrived，继续平移或前进对准
 - arrived 表示已到达车辆正上方附近，不需要贴地降落
-- 禁止在看到红车且居中时仍返回 move_forward，这是严重错误
+- 禁止在看到红车但未居中时返回 arrived
 
 输出要求：
 - 只返回一个 JSON 对象，不要附加解释
