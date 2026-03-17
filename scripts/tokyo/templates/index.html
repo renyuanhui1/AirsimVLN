@@ -181,14 +181,12 @@ function showFrame(idx) {
   if (idx < 0 || idx >= history.length) return;
   currentIdx = idx;
   const d = history[idx];
-  fetch(`/api/frame/${idx}`).then(r => r.json()).then(f => {
-    if (f.image) {
-      document.getElementById('no-img').style.display = 'none';
-      const img = document.getElementById('camera-img');
-      img.style.display = 'block';
-      img.src = 'data:image/jpeg;base64,' + f.image;
-    }
-  });
+  if (d.image) {
+    document.getElementById('no-img').style.display = 'none';
+    const img = document.getElementById('camera-img');
+    img.style.display = 'block';
+    img.src = 'data:image/jpeg;base64,' + d.image;
+  }
   document.getElementById('phase-val').textContent = d.phase || '-';
   document.getElementById('step-val').textContent = d.step || 0;
   document.getElementById('road-val').textContent = d.road_direction || '-';
@@ -224,8 +222,9 @@ function updateTimeline() {
 
 function manualSeek(idx) { stopPlay(); isLive = false; updateUI(); showFrame(parseInt(idx)); }
 function togglePlay() {
-  if (isLive) { isLive = false; if (currentIdx >= history.length-1) currentIdx = 0; startPlay(); }
-  else { isPlaying ? stopPlay() : startPlay(); }
+  if (isLive) { isLive = false; currentIdx = 0; startPlay(); }
+  else if (isPlaying) { stopPlay(); }
+  else { if (currentIdx >= history.length - 1) currentIdx = 0; startPlay(); }
   updateUI();
 }
 function goLive() { stopPlay(); isLive = true; if (history.length > 0) showFrame(history.length - 1); updateUI(); }
@@ -251,6 +250,13 @@ async function fetchData() {
     const res = await fetch('/api/data');
     const data = await res.json();
     if (data.length > history.length) {
+      // 拉取所有缺少图像的帧
+      for (let i = 0; i < data.length; i++) {
+        if (!data[i].image) {
+          const f = await fetch(`/api/frame/${i}`).then(r => r.json());
+          data[i].image = f.image || '';
+        }
+      }
       history = data;
       updateTimeline();
       if (isLive) showFrame(history.length - 1);

@@ -6,11 +6,12 @@ import requests
 import json
 import logging
 from typing import Dict, List, Optional
+
 import numpy as np
 import cv2
 
 class QwenVisionAgent:
-    def __init__(self, api_key: str, model: str = "qwen2.5-vl-72b-instruct", output_dir: str = None):
+    def __init__(self, api_key: str, model: str = "qwen3-vl-flash-2025-10-15", output_dir: str = None):
         """
         初始化 Qwen 视觉智能体
         """
@@ -146,6 +147,7 @@ class QwenVisionAgent:
         instruction: str,
         nav_state: Optional[Dict] = None,
         front_image: Optional[np.ndarray] = None,
+        search_mode: bool = False,
     ) -> Dict:
         """基于俯视图执行道路跟随与红车搜索。"""
         self._save_image(image, "aerial_nav")
@@ -155,16 +157,48 @@ class QwenVisionAgent:
         altitude = float(nav_state.get('altitude', 0.0))
         state_text = (
             f"- 当前高度: {altitude:.1f}m\n"
-            f"- 搜索高度目标: {nav_state.get('search_altitude', altitude):.1f}m\n"
             f"- 上一步动作: {nav_state.get('last_action', 'unknown')}\n"
             f"- 距离上次看到红车的步数: {nav_state.get('steps_since_seen', 'unknown')}\n"
-            f"- 连续看见红车的帧数: {nav_state.get('target_lock_frames', 0)}\n"
-            f"- 连续丢失道路的步数: {nav_state.get('road_lost_streak', 0)}\n"
-            f"- 最近一次旋转方向: {nav_state.get('last_rotation', 'none')}"
+            f"- 连续看见红车的帧数: {nav_state.get('target_lock_frames', 0)}"
         )
 
-        prompt = f"""
+        if search_mode:
+            prompt = f"""你是无人机俯视视觉导航控制器，正在从高空搜索红色车辆。
 
+任务：{instruction}
+
+当前状态：
+{state_text}
+
+第一步：仔细扫描图像，寻找红色车辆
+- 红车特征：鲜红色矩形色块，长宽比约 2:1，出现在道路或停车场上
+- 排除干扰：红色屋顶（面积大）、红色标牌（细长条）
+
+第二步：根据检测结果输出动作
+- 发现红车且 centered=true → arrived
+  - centered 判定宽松：红车车身完整可见，位于画面中央 1/2 区域内即可，不需要完全居中
+- 发现红车但不满足 centered → move_forward 继续前进
+- 未发现红车 → move_forward 12~20 米继续搜索
+
+禁止输出 rotate_left / rotate_right / hover。
+
+只返回 JSON：
+{{
+    "action": "move_forward",
+    "parameters": {{"distance": 16.0}},
+    "road_visible": true,
+    "road_follow_confidence": "high",
+    "road_direction": "forward",
+    "target_visible": true,
+    "target_offset": "center",
+    "distance_bucket": "far",
+    "centered": false,
+    "should_descend": false,
+    "reasoning": "图像中[描述是否有红色色块、位置]，因此[决策依据]"
+}}
+"""
+        else:
+            prompt = f"""
 你是东京城市三维场景中的无人机俯视视觉导航控制器。
 
 场景背景：
@@ -206,51 +240,26 @@ class QwenVisionAgent:
 
 【road_direction 判定规则（必须严格执行）】
 - 观察画面中道路的延伸方向，以画面中心为基准：
-  - 道路在画面下半部分向左偏转超过 15 度 → road_direction = "left_curve"
-  - 道路在画面下半部分向右偏转超过 15 度 → road_direction = "right_curve"
-  - 道路基本笔直延伸到画面上方 → road_direction = "forward"
-  - 出现明显十字路口或多叉路 → road_direction = "intersection"
-  - 看不到道路 → road_direction = "lost"
+  - 道路在画面下半部分向左偏转超过 15 度 → road_direction = “left_curve”
+  - 道路在画面下半部分向右偏转超过 15 度 → road_direction = “right_curve”
+  - 道路基本笔直延伸到画面上方 → road_direction = “forward”
+  - 路口交叉区域已占据画面中央大部分，多方向道路从画面正中心向四周延伸 → road_direction = “intersection”
+  - 看不到道路 → road_direction = “lost”
 - road_direction 只用于上报道路状态，不影响 action 输出
 
-【十字路口识别规则（必须严格执行）】
-- 只有当无人机已经飞到路口正上方或路口中心区域时，才报告 intersection：
-  - 路口交叉区域占据画面中央大部分，能清晰看到多个方向道路从画面中心向四周延伸
-  - 画面中心是开阔的路口地面，而不是某条单一道路
-  - 路口斑马线、停止线或路口地面必须出现在画面正中央
-- 路口还在画面前方远处（路口在画面上半部分或边缘）→ 继续报 forward，前进接近
-- 路口刚出现在画面中但还未到中心 → 继续报 forward，继续前进直到路口占据画面中央
-- 禁止在路口还未到达时就报告 intersection，这会导致无人机在路口前方就开始转弯
-- 在十字路口时 action 输出 “move_forward” 并将 road_direction 设为 “intersection”，让上层逻辑决定转弯方向
+【十字路口识别规则】
+- 当画面中央出现十字路口或多叉路口时，road_direction 报 “intersection”
+- 路口还在画面上方远处、尚未到达画面中央时，报 “forward” 继续前进
 
 【红车搜索与锁定】
-- 从高空俯视时，红车呈较小的鲜红色矩形，通常出现在道路或停车场上
-- 发现红车后，只需前进接近，禁止使用 move_left 或 move_right 平移对准
-- distance_bucket 为 far 时，前进 12 到 20 米
-- distance_bucket 为 mid 时，前进 6 到 12 米
-- distance_bucket 为 near 且 centered=true 时，输出 arrived
+{'''- 在做任何决策前，先扫描整张图像寻找红色车辆：
+  1. 寻找鲜红色（纯红/深红）的矩形色块，长宽比约 2:1
+  2. 红车通常出现在灰色道路或停车场上，排除：红色屋顶（面积大）、红色标牌（细长条）
+  3. 若发现疑似红车，在 reasoning 中描述其位置（画面哪个区域）和大小
+- 发现红车后，只需前进接近，禁止使用 move_left 或 move_right 平移对准''' if search_mode else '''- 当前阶段无需搜索红车，target_visible 始终填 false，distance_bucket 填 unknown'''}
 
 【高度管理】
 - 搜索阶段保持 90 到 110 米高度，视野广，便于找到红车
-
-
-【动作输出强约束（必须遵守）】
-- 禁止输出 rotate_left 或 rotate_right，转向由上层逻辑控制
-- 禁止连续输出 hover；默认应输出 move_forward / move_left / move_right 之一
-- 只有在以下情况才允许输出 hover：
-    1) target_visible=true 且 centered=true，正在等待到达判定
-    2) 当前帧严重模糊、无法判断道路和目标（road_visible=false 且 road_follow_confidence=low）
-- 若 road_visible=true 且 target_visible=false，优先输出 move_forward（建议 12 到 24 米），不要输出 hover
-- 若 road_visible=false 且 target_visible=false，优先输出 move_forward（建议 12 到 20 米），不要输出 hover 或 rotate
-
-到达标准（必须严格执行）：
-- 只有同时满足以下所有条件，才能返回 arrived：
-  1) target_visible=true
-  2) centered=true（红车在画面正中央，偏移不超过画面宽度的 15%）
-  3) distance_bucket 为 near 或 mid
-- 未同时满足以上三条，禁止输出 arrived，继续平移或前进对准
-- arrived 表示已到达车辆正上方附近，不需要贴地降落
-- 禁止在看到红车但未居中时返回 arrived
 
 输出要求：
 - 只返回一个 JSON 对象，不要附加解释
@@ -263,14 +272,14 @@ class QwenVisionAgent:
 - target_visible: true/false
 - target_offset: "left|right|center|upper|lower|unknown"
 - distance_bucket: "near|mid|far|unknown"
-- centered: true/false
+- centered: true/false（红车是否在前进方向上居中，即画面上下中轴线附近，左右偏移不影响此判断）
 - should_descend: true/false
 
 distance_bucket 从高空俯视判定：
-- near: 红车在画面中清晰可见，占比明显，位置居中或接近居中
-- mid: 能看到红色矩形但体积仍小，还需接近或平移对准
-- far: 红色矩形很小或需要仔细辨认，明显还远
-- unknown: 看不到或无法判断
+- near: 红车清晰可见，占画面面积 >3%，细节可辨
+- mid: 能看到红色矩形，占画面面积 1~3%，仍需接近
+- far: 红色矩形很小，占画面面积 <1%，需仔细辨认
+- unknown: 未发现红车或无法判断
 
 只返回 JSON，例如：
 {{
@@ -311,7 +320,7 @@ distance_bucket 从高空俯视判定：
                 "distance_bucket": "unknown",
                 "centered": False,
                 "should_descend": False,
-                "reasoning": "俯视导航决策失败，使用兜底前进动作保持搜索推进",
+                "reasoning": "俯视导航决策失败，使用前进动作保持搜索推进",
             },
             log_prefix="俯视导航动作决策",
         )

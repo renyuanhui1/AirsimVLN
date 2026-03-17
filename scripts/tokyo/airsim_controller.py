@@ -261,9 +261,13 @@ class AirSimController:
         ).join()
     
     def hover(self, duration: float = 2):
-        """悬停"""
+        """悬停，锁定当前位置防止漂移"""
         self.logger.info(f"悬停 {duration}秒")
-        self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+        pos = self.client.getMultirotorState(vehicle_name=self.vehicle_name).kinematics_estimated.position
+        self.client.moveToPositionAsync(
+            pos.x_val, pos.y_val, pos.z_val, velocity=0.5,
+            vehicle_name=self.vehicle_name
+        ).join()
         time.sleep(duration)
     
     def get_position(self) -> Tuple[float, float, float]:

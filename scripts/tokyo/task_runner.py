@@ -52,11 +52,10 @@ def _safe_float(v, default):
 # ── 各阶段执行函数 ────────────────────────────────────────────
 
 def phase_follow_road(ctrl: AirSimController, qwen: QwenVisionAgent,
-                      max_steps: int = 20, ignore_intersection_steps: int = 0) -> str:
+                      max_steps: int = 20, instruction: str = '沿道路前进，注意识别十字路口') -> str:
     """
     沿道路前进，直到 VLM 报告 intersection 或步数耗尽。
     返回退出原因: 'intersection' | 'steps_exhausted'
-    ignore_intersection_steps: 前 N 步忽略 intersection，用于刚穿过路口后的冷却
     """
     logger.info('▶ 阶段: 沿道路前进')
     last_action = 'hover'
@@ -64,6 +63,7 @@ def phase_follow_road(ctrl: AirSimController, qwen: QwenVisionAgent,
     road_lost_streak = 0
 
     for step in range(1, max_steps + 1):
+        time.sleep(1.0)  # 等待无人机停稳
         img = ctrl.get_bottom_camera_image()
         if img is None:
             ctrl.hover(duration=1.0)
@@ -85,7 +85,7 @@ def phase_follow_road(ctrl: AirSimController, qwen: QwenVisionAgent,
             'road_lost_streak': road_lost_streak,
             'last_rotation': last_rotation,
         }
-        decision = qwen.decide_action_from_aerial_scene(img, '沿道路前进，注意识别十字路口', nav_state)
+        decision = qwen.decide_action_from_aerial_scene(img, instruction, nav_state)
 
         road_direction = str(decision.get('road_direction', 'forward')).strip().lower()
         road_visible   = bool(decision.get('road_visible', False))
@@ -103,33 +103,20 @@ def phase_follow_road(ctrl: AirSimController, qwen: QwenVisionAgent,
             target_offset='unknown',
         )
 
-        # 检测到十字路口，直接退出执行转弯
-        if road_direction == 'intersection' and step > ignore_intersection_steps:
-            logger.info('已到达路口中心，退出 follow_road 阶段')
+        # 检测到十字路口，先前进到路口中央再退出
+        if road_direction == 'intersection':
+            logger.info('检测到十字路口，前进到路口中央')
+            ctrl.move_forward(distance=30.0, speed=2.0)
+            time.sleep(0.5)
+            logger.info('已到达路口中央，退出 follow_road 阶段')
             return 'intersection'
 
-        if road_visible:
-            road_lost_streak = 0
-        else:
-            road_lost_streak += 1
-
-        # 执行 VLM 决策（旋转或前进）
-        action = decision.get('action', 'move_forward')
-        if action == 'rotate_left':
-            angle = _clamp(_safe_float(decision.get('parameters', {}).get('angle'), 20.0), 8.0, 35.0)
-            ctrl.rotate_yaw(angle=angle, speed=20)
-            last_rotation = 'left'
-            last_action = 'rotate_left'
-        elif action == 'rotate_right':
-            angle = _clamp(_safe_float(decision.get('parameters', {}).get('angle'), 20.0), 8.0, 35.0)
-            ctrl.rotate_yaw(angle=-angle, speed=20)
-            last_rotation = 'right'
-            last_action = 'rotate_right'
-        else:
-            ctrl.move_forward(distance=16.0, speed=2.5)
-            last_action = 'move_forward'
+        # 默认前进
+        ctrl.move_forward(distance=16.0, speed=2.5)
+        last_action = 'move_forward'
+        if road_direction not in {'left_curve', 'right_curve'}:
             last_rotation = 'none'
-        time.sleep(2.5)
+        time.sleep(0.4)
 
     return 'steps_exhausted'
 
@@ -138,22 +125,15 @@ def phase_turn_at_intersection(ctrl: AirSimController, direction: str,
                                 angle: float = 85.0):
     """在十字路口执行大角度转弯，然后小步前进对齐新道路。"""
     logger.info(f'▶ 阶段: 十字路口{direction}转 {angle}°')
-    action = 'rotate_left' if direction == 'left' else 'rotate_right'
-    web_monitor.update_state(
-        image=None, step=0, phase=f'路口{direction}转',
-        altitude=ctrl.get_altitude(),
-        action=action, reasoning=f'路口{direction}转 {angle}°',
-        road_visible=True, road_direction='intersection',
-        target_visible=False, target_offset='unknown',
-    )
     if direction == 'left':
         ctrl.rotate_yaw(angle=angle, speed=20)
     else:
         ctrl.rotate_yaw(angle=-angle, speed=20)
-    time.sleep(1.0)
-    # 转弯后前进对齐新道路
-    ctrl.move_forward(distance=20.0, speed=2.0)
     time.sleep(0.5)
+    # 转弯后前进一小步对齐新道路
+    ctrl.move_forward(distance=10.0, speed=2.0)
+
+    time.sleep(0.4)
 
 
 def phase_find_target(ctrl: AirSimController, qwen: QwenVisionAgent,
@@ -175,18 +155,13 @@ def phase_find_target(ctrl: AirSimController, qwen: QwenVisionAgent,
     instruction = f'沿道路搜索{target_desc}，找到后飞到正上方悬停。'
 
     for step in range(1, max_steps + 1):
+        time.sleep(1.0)  # 等待无人机停稳
         img = ctrl.get_bottom_camera_image()
         if img is None:
             ctrl.hover(duration=1.0)
             continue
 
         altitude = ctrl.get_altitude()
-        if not (last_seen_step and step - last_seen_step <= 3) and altitude < SEARCH_ALTITUDE - 2.0:
-            climb = _clamp(min(6.0, SEARCH_ALTITUDE - altitude), 1.5, 6.0)
-            ctrl.move_up(distance=climb, speed=1.5)
-            last_action = 'move_up'
-            continue
-
         steps_since_seen = (step - last_seen_step) if last_seen_step else 999
         nav_state = {
             'altitude': altitude,
@@ -197,7 +172,7 @@ def phase_find_target(ctrl: AirSimController, qwen: QwenVisionAgent,
             'road_lost_streak': road_lost_streak,
             'last_rotation': last_rotation,
         }
-        decision = qwen.decide_action_from_aerial_scene(img, instruction, nav_state)
+        decision = qwen.decide_action_from_aerial_scene(img, instruction, nav_state, search_mode=True)
 
         action          = str(decision.get('action', 'hover')).strip().lower()
         params          = decision.get('parameters', {}) or {}
@@ -240,30 +215,18 @@ def phase_find_target(ctrl: AirSimController, qwen: QwenVisionAgent,
             f'offset={target_offset} dist={distance_bucket} centered={centered}'
         )
 
-        # 到达判定
-        if action == 'arrived' or (target_visible and centered and distance_bucket in {'near', 'mid'}):
+        # 到达判定：连续2帧看到目标才算完成
+        if action == 'arrived' or (target_visible and target_lock_frames >= 2):
             logger.info('已到达目标正上方，任务完成')
+            web_monitor.update_state(
+                image=img, step=step, phase='任务完成',
+                altitude=altitude, action='arrived',
+                reasoning='已找到目标，任务完成',
+                road_visible=road_visible, road_direction=road_direction,
+                target_visible=target_visible, target_offset=target_offset,
+            )
             ctrl.hover(duration=2.0)
             return True
-
-        # 连续 hover 兜底
-        if action == 'hover' and not target_visible:
-            consecutive_hover += 1
-            action = 'move_forward'
-            params = {'distance': 14.0}
-        else:
-            consecutive_hover = 0
-
-        # 目标锁定后下降，最多下降2次
-        if target_visible and should_descend and altitude > TRACK_ALTITUDE and descend_count < 2:
-            descend = _clamp(min(6.0, altitude - TRACK_ALTITUDE), 1.5, 6.0)
-            if altitude - descend >= MIN_ALTITUDE:
-                logger.info(f'目标已锁定，下降 {descend:.1f}m（第{descend_count+1}次）')
-                ctrl.move_down(distance=descend, speed=1.5)
-                descend_count += 1
-                last_action = 'move_down'
-                time.sleep(2.5)
-                continue
 
         # 执行动作
         if action == 'move_forward':
@@ -292,10 +255,14 @@ def phase_find_target(ctrl: AirSimController, qwen: QwenVisionAgent,
             max_desc = max(0.0, altitude - MIN_ALTITUDE)
             dist = _clamp(_safe_float(params.get('distance'), 3.0), 1.0, min(8.0, max_desc)) if max_desc > 0 else 0.0
             ctrl.move_down(distance=dist, speed=1.5) if dist > 0 else ctrl.hover(duration=1.0)
-        elif action in ('rotate_left', 'rotate_right'):
-            # 搜索阶段禁止旋转，改为前进
-            ctrl.move_forward(distance=14.0, speed=2.5)
-            action = 'move_forward'
+        elif action == 'rotate_left':
+            angle = _clamp(_safe_float(params.get('angle'), 20.0), 8.0, 45.0)
+            ctrl.rotate_yaw(angle=angle, speed=20)
+            last_rotation = 'left'
+        elif action == 'rotate_right':
+            angle = _clamp(_safe_float(params.get('angle'), 20.0), 8.0, 45.0)
+            ctrl.rotate_yaw(angle=-angle, speed=20)
+            last_rotation = 'right'
         else:
             ctrl.hover(duration=_clamp(_safe_float(params.get('duration'), 1.5), 0.5, 3.0))
             action = 'hover'
@@ -304,7 +271,7 @@ def phase_find_target(ctrl: AirSimController, qwen: QwenVisionAgent,
             last_rotation = 'none'
 
         last_action = action
-        time.sleep(2.5)
+        time.sleep(1.5)
 
     logger.warning('达到最大步数，未找到目标')
     return False
@@ -319,6 +286,7 @@ def run_task_sequence(steps: List[Dict[str, Any]], instruction: str = ''):
     示例 steps:
     [
         {"type": "follow_road", "max_steps": 20},
+        {"type": "cross_intersection"},
         {"type": "turn_at_intersection", "direction": "left"},
         {"type": "find_target", "target": "红色车辆", "max_steps": 40},
     ]
@@ -328,11 +296,15 @@ def run_task_sequence(steps: List[Dict[str, Any]], instruction: str = ''):
 
     web_monitor.start_server(port=5000)
     time.sleep(1)
-    web_monitor.set_task_info(instruction=instruction, steps=[s.get('type', '') + (f"({s.get('direction','')})" if 'direction' in s else f"({s.get('target','')})" if 'target' in s else '') for s in steps])
+    def _step_label(s):
+        t = s.get('type', '')
+        if 'direction' in s: return f"{t}({s['direction']})"
+        if 'target' in s: return f"{t}({s['target']})"
+        return t
+    web_monitor.set_task_info(instruction=instruction, steps=[_step_label(s) for s in steps])
 
     ctrl = AirSimController(ip=AIRSIM_IP, port=AIRSIM_PORT)
     qwen = QwenVisionAgent(api_key=QWEN_API_KEY)
-    _next_ignore_steps = 0
 
     try:
         ctrl.arm_and_takeoff(altitude=SEARCH_ALTITUDE)
@@ -344,12 +316,11 @@ def run_task_sequence(steps: List[Dict[str, Any]], instruction: str = ''):
             logger.info(f'═══ 任务步骤 {i+1}/{len(steps)}: {stype} ═══')
 
             if stype == 'follow_road':
-                result = phase_follow_road(ctrl, qwen, max_steps=step.get('max_steps', 20), ignore_intersection_steps=_next_ignore_steps)
-                _next_ignore_steps = 0
+                result = phase_follow_road(ctrl, qwen, max_steps=step.get('max_steps', 20), instruction=step.get('instruction', '沿道路前进，注意识别十字路口'))
                 logger.info(f'follow_road 结束，原因: {result}')
 
             elif stype == 'cross_intersection':
-                logger.info('穿越路口，前进 60m')
+                logger.info('穿越路口，前进 80m')
                 web_monitor.update_state(
                     image=None, step=0, phase='穿越路口',
                     altitude=ctrl.get_altitude(),
@@ -357,13 +328,25 @@ def run_task_sequence(steps: List[Dict[str, Any]], instruction: str = ''):
                     road_visible=True, road_direction='intersection',
                     target_visible=False, target_offset='unknown',
                 )
-                ctrl.move_forward(distance=60.0, speed=2.5)
+                ctrl.move_forward(distance=80.0, speed=2.5)
                 time.sleep(2.0)
-                _next_ignore_steps = 2
 
             elif stype == 'turn_at_intersection':
                 direction = step.get('direction', 'left')
                 angle = float(step.get('angle', 85.0))
+                turn_action = 'rotate_left' if direction == 'left' else 'rotate_right'
+                web_monitor.update_state(
+                    image=ctrl.get_bottom_camera_image(),
+                    step=0,
+                    phase='路口转向',
+                    altitude=ctrl.get_altitude(),
+                    action=turn_action,
+                    reasoning=f'在路口执行{direction}转 {angle:.1f}°',
+                    road_visible=True,
+                    road_direction='intersection',
+                    target_visible=False,
+                    target_offset='unknown',
+                )
                 phase_turn_at_intersection(ctrl, direction, angle)
 
             elif stype == 'find_target':
@@ -392,7 +375,7 @@ if __name__ == '__main__':
     task = [
         {"type": "follow_road",           "max_steps": 35},
         {"type": "cross_intersection"},
-        {"type": "follow_road",           "max_steps": 35},
+        {"type": "follow_road",           "max_steps": 35, "instruction": "沿道路前进，寻找前方的十字路口，到达路口中央时报告 intersection"},
         {"type": "turn_at_intersection",  "direction": "left"},
         {"type": "find_target",           "target": "停在路边的红色车辆", "max_steps": 40},
     ]
