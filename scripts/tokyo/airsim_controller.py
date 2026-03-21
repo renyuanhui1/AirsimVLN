@@ -3,7 +3,7 @@ import math
 import airsim
 import numpy as np
 import time
-from typing import Tuple, Iterable, Optional
+from typing import Tuple, Iterable, Optional, Dict
 import logging
 
 class AirSimController:
@@ -52,25 +52,78 @@ class AirSimController:
         current_z = -self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.position.z_val
         self.logger.info(f"起飞完成，当前高度: {current_z:.1f}m")
 
+    def _fetch_scene_response(self, camera_name: str):
+        responses = self.client.simGetImages([
+            airsim.ImageRequest(camera_name, airsim.ImageType.Scene, False, False)
+        ], vehicle_name=self.vehicle_name)
+        if not responses or len(responses[0].image_data_uint8) == 0:
+            return None
+        return responses[0]
+
+    def _decode_scene_response(self, response) -> np.ndarray:
+        img1d = np.frombuffer(response.image_data_uint8, dtype=np.uint8)
+        return img1d.reshape(response.height, response.width, 3)
+
+    def get_named_camera_image(self, camera_name: str) -> Optional[np.ndarray]:
+        try:
+            response = self._fetch_scene_response(camera_name)
+            if response is None:
+                return None
+            return self._decode_scene_response(response)
+        except Exception as exc:
+            self.logger.warning(f"获取相机 {camera_name} 图像异常: {exc}")
+            return None
+
+    def probe_camera_candidates(self) -> Dict[str, np.ndarray]:
+        images: Dict[str, np.ndarray] = {}
+        ordered = []
+        for name in self.BOTTOM_CAMERA_CANDIDATES + self.FRONT_CAMERA_CANDIDATES:
+            if name not in ordered:
+                ordered.append(name)
+        for name in ordered:
+            image = self.get_named_camera_image(name)
+            if image is not None:
+                images[name] = image
+        return images
+
     def _resolve_front_camera(self) -> Optional[str]:
         """找到第一个可用的前视相机名称并缓存。"""
         if self._front_camera_name:
             return self._front_camera_name
         for name in self.FRONT_CAMERA_CANDIDATES:
-            try:
-                responses = self.client.simGetImages([
-                    airsim.ImageRequest(name, airsim.ImageType.Scene, False, False)
-                ], vehicle_name=self.vehicle_name)
-                if responses and len(responses[0].image_data_uint8) > 0:
-                    self._front_camera_name = name
-                    self.logger.info(f"前视相机已解析为: {name}")
-                    return name
-            except Exception:
-                continue
+            image = self.get_named_camera_image(name)
+            if image is not None:
+                self._front_camera_name = name
+                self.logger.info(f"前视相机已解析为: {name}")
+                return name
+        return None
+
+    def _resolve_bottom_camera(self) -> Optional[str]:
+        cached = self._resolved_cameras.get("bottom")
+        if cached:
+            return cached
+        for name in self.BOTTOM_CAMERA_CANDIDATES:
+            image = self.get_named_camera_image(name)
+            if image is not None:
+                self._resolved_cameras["bottom"] = name
+                self.logger.info(f"底视相机已解析为: {name}")
+                return name
         return None
 
     def enable_topdown_only_mode(self) -> bool:
-        """将采集相机固定为俯视角，并尝试将仿真窗口子视图切换到该相机。"""
+        """优先使用真实底视相机；若不存在，则将前视相机旋转为俯视。"""
+        native_bottom = self._resolve_bottom_camera()
+        if native_bottom is not None:
+            self._topdown_camera_name = native_bottom
+            self._topdown_mode_enabled = True
+            self.logger.info(f"已启用底视模式，使用原生底视相机: {native_bottom}")
+            for window_id in (0, 1, 2):
+                try:
+                    self.client.simSetSubwindow(window_id, native_bottom, airsim.ImageType.Scene, vehicle_name=self.vehicle_name)
+                except Exception:
+                    pass
+            return True
+
         cam = self._resolve_front_camera()
         if cam is None:
             self.logger.error("未找到可用相机，无法启用俯视模式")
@@ -80,7 +133,7 @@ class AirSimController:
             self.client.simSetCameraPose(cam, self._DOWN_POSE, vehicle_name=self.vehicle_name)
             self._topdown_camera_name = cam
             self._topdown_mode_enabled = True
-            self.logger.info(f"已启用仅俯视模式，相机: {cam} (pitch=-90)")
+            self.logger.info(f"未找到原生底视相机，已退回前视相机俯视方案: {cam} (pitch=-90)")
 
             for window_id in (0, 1, 2):
                 try:
@@ -102,16 +155,11 @@ class AirSimController:
         last_error = None
         for camera_name in candidates:
             try:
-                responses = self.client.simGetImages([
-                    airsim.ImageRequest(camera_name, airsim.ImageType.Scene, False, False)
-                ], vehicle_name=self.vehicle_name)
-
-                if not responses or len(responses[0].image_data_uint8) == 0:
+                response = self._fetch_scene_response(camera_name)
+                if response is None:
                     continue
 
-                response = responses[0]
-                img1d = np.frombuffer(response.image_data_uint8, dtype=np.uint8)
-                img_rgb = img1d.reshape(response.height, response.width, 3)
+                img_rgb = self._decode_scene_response(response)
 
                 if self._resolved_cameras.get(role) != camera_name:
                     self.logger.info(f"{role} 相机已解析为: {camera_name}")
@@ -203,7 +251,7 @@ class AirSimController:
         if not self._topdown_mode_enabled:
             self.enable_topdown_only_mode()
 
-        cam = self._topdown_camera_name or self._resolve_front_camera()
+        cam = self._topdown_camera_name or self._resolve_bottom_camera() or self._resolve_front_camera()
         if cam is None:
             self.logger.error("无可用相机，无法获取俯视图")
             return None

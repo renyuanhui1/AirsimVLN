@@ -11,7 +11,7 @@ import numpy as np
 import cv2
 
 class QwenVisionAgent:
-    def __init__(self, api_key: str, model: str = "qwen3-vl-flash-2025-10-15", output_dir: str = None):
+    def __init__(self, api_key: str, model: str = "qwen2.5-vl-72b-instruct", output_dir: str = None):
         """
         初始化 Qwen 视觉智能体
         """
@@ -199,7 +199,7 @@ class QwenVisionAgent:
 """
         else:
             prompt = f"""
-你是东京城市三维场景中的无人机俯视视觉导航控制器。
+你是三维场景中的无人机俯视视觉导航控制器。
 
 场景背景：
 - 无人机飞行高度约 100 米（搜索阶段），使用底部俯视摄像头（垂直朝下）
@@ -237,15 +237,6 @@ class QwenVisionAgent:
 - 未见红车时，沿道路方向前进，单步建议 14 到 28 米
 - 无论道路是否弯折，始终输出 move_forward，不要输出 rotate_left 或 rotate_right
 - 转向由上层逻辑控制，你只需判断道路和目标状态
-
-【road_direction 判定规则（必须严格执行）】
-- 观察画面中道路的延伸方向，以画面中心为基准：
-  - 道路在画面下半部分向左偏转超过 15 度 → road_direction = “left_curve”
-  - 道路在画面下半部分向右偏转超过 15 度 → road_direction = “right_curve”
-  - 道路基本笔直延伸到画面上方 → road_direction = “forward”
-  - 路口交叉区域已占据画面中央大部分，多方向道路从画面正中心向四周延伸 → road_direction = “intersection”
-  - 看不到道路 → road_direction = “lost”
-- road_direction 只用于上报道路状态，不影响 action 输出
 
 【十字路口识别规则】
 - 当画面中央出现十字路口或多叉路口时，road_direction 报 “intersection”

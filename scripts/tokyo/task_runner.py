@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # ── 环境变量配置 ──────────────────────────────────────────────
 QWEN_API_KEY        = os.getenv('QWEN_API_KEY', 'sk-b988e0fff98740ef90a8915d3b77dc11')
-AIRSIM_IP           = os.getenv('AIRSIM_IP', '172.21.192.1')
+AIRSIM_IP           = os.getenv('AIRSIM_IP', 'localhost')
 AIRSIM_PORT         = int(os.getenv('AIRSIM_PORT', '41451'))
 SEARCH_ALTITUDE     = float(os.getenv('VLN_SEARCH_ALTITUDE', '100'))
 TRACK_ALTITUDE      = float(os.getenv('VLN_TRACK_ALTITUDE', '28'))
@@ -303,7 +303,18 @@ def run_task_sequence(steps: List[Dict[str, Any]], instruction: str = ''):
         return t
     web_monitor.set_task_info(instruction=instruction, steps=[_step_label(s) for s in steps])
 
-    ctrl = AirSimController(ip=AIRSIM_IP, port=AIRSIM_PORT)
+    logger.info(f'AirSim connection target: AIRSIM_IP={AIRSIM_IP}, AIRSIM_PORT={AIRSIM_PORT}')
+    try:
+        ctrl = AirSimController(ip=AIRSIM_IP, port=AIRSIM_PORT)
+    except Exception:
+        logger.error(
+            f'连接 AirSim 失败（AIRSIM_IP={AIRSIM_IP}, AIRSIM_PORT={AIRSIM_PORT}）',
+            exc_info=True,
+        )
+        logger.error('排查建议: 1) 确认 UE/Colosseum 已完全加载并进入场景。')
+        logger.error('排查建议: 2) WSL mirrored 网络模式下优先使用 AIRSIM_IP=localhost。')
+        logger.error("排查建议: 3) 可先探测端口: timeout 2 bash -lc '</dev/tcp/localhost/41451'")
+        raise
     qwen = QwenVisionAgent(api_key=QWEN_API_KEY)
 
     try:
